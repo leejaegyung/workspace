@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Kinetic Workspace (Dev)",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 3001
+    },
+    {
+      "name": "Kinetic Server",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "kinetic-workspace", "run", "start"],
+      "port": 3001
+    },
+    {
+      "name": "Kinetic Workspace (Preview)",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "kinetic-workspace", "run", "preview"],
+      "port": 4173
+    }
+  ]
+}
