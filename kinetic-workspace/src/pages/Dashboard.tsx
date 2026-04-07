@@ -5,6 +5,7 @@ import {
   TrendingUp, Clock, CheckCircle2, MoreHorizontal,
   Code, MessageCircle, Zap, Calendar, ChevronRight, Plus, Trash2, X,
   ChevronLeft, ChevronRight as ChevronRightIcon, Clock3, Tag, Check,
+  BarChart2, Edit2, Globe, Lock,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useAuth } from '../contexts/AuthContext';
@@ -20,6 +21,7 @@ interface CalEvent {
   time?: string;
   color: 'primary' | 'secondary' | 'tertiary' | 'error';
   tag?: string;
+  sharing?: 'personal' | 'all';
 }
 
 const INIT_EVENTS: CalEvent[] = [
@@ -41,9 +43,50 @@ const COLOR_OPTIONS = [
 
 export function Dashboard() {
   const { user } = useAuth();
-  const { projects, addProject, sprintTasks, toggleSprintTask, addSprintTask, deleteSprintTask, activities, markAllRead, kanban } = useApp();
+  const { projects, addProject, sprintTasks, toggleSprintTask, addSprintTask, deleteSprintTask, activities, markAllRead, kanban, kanbanLoading, addKanbanTask, editKanbanTask, projectKanban, initProjectKanban } = useApp();
   const { toast } = useToast();
   const today = new Date().toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
+
+  // 날씨 실시간 (Open-Meteo — 서울, 무료 API)
+  const [weather, setWeather] = useState<{ temp: number; desc: string; icon: string } | null>(null);
+  useEffect(() => {
+    fetch('https://api.open-meteo.com/v1/forecast?latitude=37.5665&longitude=126.9780&current=temperature_2m,weathercode&timezone=Asia/Seoul')
+      .then(r => r.json())
+      .then(d => {
+        const temp = Math.round(d.current?.temperature_2m ?? 0);
+        const code = d.current?.weathercode ?? 0;
+        const getDesc = (c: number) => {
+          if (c === 0) return { desc: '맑음', icon: '☀️' };
+          if (c <= 2) return { desc: '대체로 맑음', icon: '🌤️' };
+          if (c === 3) return { desc: '흐림', icon: '☁️' };
+          if (c <= 48) return { desc: '안개', icon: '🌫️' };
+          if (c <= 55) return { desc: '이슬비', icon: '🌦️' };
+          if (c <= 65) return { desc: '비', icon: '🌧️' };
+          if (c <= 75) return { desc: '눈', icon: '❄️' };
+          if (c <= 82) return { desc: '소나기', icon: '🌩️' };
+          return { desc: '뇌우', icon: '⛈️' };
+        };
+        setWeather({ temp, ...getDesc(code) });
+      })
+      .catch(() => setWeather({ temp: 18, desc: '구름 조금', icon: '🌤️' }));
+  }, []);
+
+  // 프로젝트 칸반 초기화 (대시보드용 달성률 계산)
+  useEffect(() => {
+    projects.forEach(p => initProjectKanban(p.id));
+  }, [projects]); // eslint-disable-line
+
+  function getProjectProgress(projectId: string): number {
+    const cols = projectKanban[projectId];
+    if (!cols) return 0;
+    const total = cols.flatMap(c => c.tasks).length;
+    if (total === 0) return 0;
+    const done = cols.find(c => c.title === '완료')?.tasks.length ?? 0;
+    return Math.round((done / total) * 100);
+  }
+
+  const avgProjectProgress = projects.length === 0 ? 0
+    : Math.round(projects.reduce((s, p) => s + getProjectProgress(p.id), 0) / projects.length);
 
   // Metric modal state
   const [metricModal, setMetricModal] = useState<'tasks' | 'time' | 'deadlines' | null>(null);
@@ -55,7 +98,7 @@ export function Dashboard() {
     apiFetch('/api/data/calendar-events', {})
       .then(r => r.ok ? r.json() : { events: [] })
       .then(({ events = [] }) => setCalEvents(events.map((e: any) => ({
-        id: e.id, title: e.title, date: e.date, time: e.time ?? '', color: e.color, tag: e.tag ?? ''
+        id: e.id, title: e.title, date: e.date, time: e.time ?? '', color: e.color, tag: e.tag ?? '', sharing: e.sharing ?? 'personal'
       }))))
       .catch(() => setCalEvents(INIT_EVENTS)); // fallback to hardcoded on error
   }, []);
@@ -67,7 +110,17 @@ export function Dashboard() {
       await apiFetch('/api/data/calendar-events', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, ...ev }),
+        body: JSON.stringify({ id, ...ev, sharing: ev.sharing ?? 'personal' }),
+      });
+    } catch {}
+  }
+  async function editCalEvent(id: string, updates: Partial<Omit<CalEvent, 'id'>>) {
+    setCalEvents(prev => prev.map(e => e.id === id ? { ...e, ...updates } : e));
+    try {
+      await apiFetch(`/api/data/calendar-events/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
       });
     } catch {}
   }
@@ -150,10 +203,18 @@ export function Dashboard() {
     await apiFetch(`/api/data/weekly-goals/${id}`, { method: 'DELETE', credentials: 'include' }).catch(() => {});
   }
 
-  // Sprint task add state
+  // 금일 업무 추가 상태 (kanban 기반)
   const [addingTask, setAddingTask]   = useState(false);
   const [newTaskLabel, setNewTaskLabel] = useState('');
   const newTaskRef = useRef<HTMLInputElement>(null);
+
+  // 개인 칸반에서 할일/진행중 태스크 가져오기
+  const todoCol   = kanban.find(c => c.title === '할 일');
+  const inProgCol = kanban.find(c => c.title === '진행 중');
+  const todayTasks = [
+    ...(todoCol?.tasks ?? []),
+    ...(inProgCol?.tasks ?? []),
+  ];
 
   // Activity detail modal
   const [activityDetail, setActivityDetail] = useState<any | null>(null);
@@ -189,12 +250,18 @@ export function Dashboard() {
     setProjName(''); setProjPhase(''); setProjColor(COLOR_OPTIONS[0].value); setProjMembers('1');
   }
 
-  function handleAddSprintTask() {
+  async function handleAddTodayTask() {
     if (!newTaskLabel.trim()) { setAddingTask(false); return; }
-    addSprintTask(newTaskLabel.trim());
+    const colId = todoCol?.id;
+    if (!colId) { toast('개인 업무 칸반을 불러오는 중입니다. 잠시 후 다시 시도해주세요.', 'info'); return; }
+    await addKanbanTask(colId, {
+      tag: '금일 업무',
+      title: newTaskLabel.trim(),
+      color: 'primary',
+    });
     setNewTaskLabel('');
     setAddingTask(false);
-    toast('스프린트 태스크가 추가되었습니다.', 'success');
+    toast('금일 업무에 추가되었습니다.', 'success');
   }
 
   function handleMarkAllRead() {
@@ -244,15 +311,15 @@ export function Dashboard() {
 
           {/* Metric cards */}
           {(() => {
-            const pendingTasks = sprintTasks.filter(t => !t.checked).length + kanban.flatMap(c => c.tasks).filter(t => !t.isCompleted).length;
+            const pendingTasks = kanban.flatMap(c => c.tasks).filter(t => !t.isCompleted).length;
             const today2 = new Date(); today2.setHours(0,0,0,0);
             const in7days = new Date(today2); in7days.setDate(in7days.getDate() + 7);
             const upcomingCount = calEvents.filter(e => { const d = new Date(e.date + 'T00:00'); return d >= today2 && d <= in7days; }).length;
             return (
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
-                <MetricCard icon={CheckCircle2} label="미완료 태스크" value={String(pendingTasks)}   trend="스프린트 + 칸반" color="primary"   onClick={() => setMetricModal('tasks')} />
-                <MetricCard icon={Clock}        label="추적 시간"     value="34.2h"                  trend="최근 24시간"    color="secondary" onClick={() => setMetricModal('time')} />
-                <MetricCard icon={Calendar}     label="다가오는 마감" value={String(upcomingCount)}  trend="7일 이내"       color="tertiary"  onClick={() => setMetricModal('deadlines')} />
+                <MetricCard icon={CheckCircle2} label="미완료 태스크"    value={String(pendingTasks)}            trend="칸반 기준"         color="primary"   onClick={() => setMetricModal('tasks')} />
+                <MetricCard icon={BarChart2}    label="프로젝트 달성률" value={`${avgProjectProgress}%`}         trend={`${projects.length}개 프로젝트`} color="secondary" onClick={() => setMetricModal('time')} />
+                <MetricCard icon={Calendar}     label="다가오는 마감"    value={String(upcomingCount)}           trend="7일 이내"           color="tertiary"  onClick={() => setMetricModal('deadlines')} />
               </div>
             );
           })()}
@@ -285,7 +352,7 @@ export function Dashboard() {
             </div>
             <div className="space-y-6">
               {projects.map((p) => (
-                <ProjectProgress key={p.id} project={p} />
+                <ProjectProgress key={p.id} project={{ ...p, progress: getProjectProgress(p.id) }} />
               ))}
             </div>
           </div>
@@ -299,15 +366,19 @@ export function Dashboard() {
             <div className="absolute -right-4 -top-4 w-24 h-24 bg-primary/5 rounded-full blur-2xl group-hover:bg-primary/10 transition-all" />
             <div className="relative z-10">
               <div className="flex items-center gap-2 mb-1">
-                <span className="text-xs font-bold text-on-surface-variant uppercase tracking-widest">서울</span>
+                <span className="text-xs font-bold text-on-surface-variant uppercase tracking-widest">서울 · 실시간</span>
               </div>
-              <div className="flex items-baseline gap-1">
-                <h3 className="text-4xl font-black font-headline tracking-tighter">18°C</h3>
-                <span className="text-xs text-on-surface-variant font-medium">구름 조금</span>
-              </div>
+              {weather ? (
+                <div className="flex items-baseline gap-2">
+                  <h3 className="text-4xl font-black font-headline tracking-tighter">{weather.temp}°C</h3>
+                  <span className="text-xs text-on-surface-variant font-medium">{weather.desc}</span>
+                </div>
+              ) : (
+                <div className="text-2xl font-black font-headline tracking-tighter text-on-surface-variant animate-pulse">--°C</div>
+              )}
             </div>
             <div className="relative z-10 flex flex-col items-center">
-              <Zap className="w-12 h-12 text-primary fill-primary/20 animate-pulse" />
+              <span className="text-5xl">{weather?.icon ?? '🌤️'}</span>
             </div>
           </div>
 
@@ -356,10 +427,13 @@ export function Dashboard() {
             </div>
           </div>
 
-          {/* Daily Sprint */}
+          {/* 금일 업무 (kanban 할일 + 진행중 태스크) */}
           <div className="glass-panel p-6 rounded-2xl">
             <div className="flex justify-between items-center mb-6">
-              <h2 className="font-headline font-bold text-lg">오늘의 스프린트</h2>
+              <div>
+                <h2 className="font-headline font-bold text-lg">금일 업무</h2>
+                <p className="text-[11px] text-on-surface-variant mt-0.5">개인 업무 · 할 일 &amp; 진행 중</p>
+              </div>
               <button
                 onClick={() => setAddingTask(true)}
                 className="w-8 h-8 rounded-lg bg-primary/10 text-primary flex items-center justify-center hover:bg-primary/20 transition-colors"
@@ -367,29 +441,54 @@ export function Dashboard() {
                 <Plus className="w-4 h-4" />
               </button>
             </div>
-            <div className="space-y-4">
-              {sprintTasks.map((task) => (
-                <TaskItem
-                  key={task.id}
-                  task={task}
-                  onToggle={() => {
-                    toggleSprintTask(task.id);
-                    if (!task.checked) toast(`"${task.label}" 완료!`, 'delight');
-                  }}
-                  onDelete={() => { deleteSprintTask(task.id); toast('태스크가 삭제되었습니다.', 'info'); }}
-                />
-              ))}
+            <div className="space-y-3">
+              {kanbanLoading ? (
+                <p className="text-xs text-on-surface-variant/50 py-4 text-center">불러오는 중...</p>
+              ) : todayTasks.length === 0 && !addingTask ? (
+                <p className="text-xs text-on-surface-variant/50 py-4 text-center">할 일과 진행 중인 업무가 없습니다.</p>
+              ) : (
+                todayTasks.map((task) => {
+                  const colTitle = todoCol?.tasks.find(t => t.id === task.id) ? '할 일' : '진행 중';
+                  const colId = colTitle === '할 일' ? todoCol?.id : inProgCol?.id;
+                  return (
+                    <div key={task.id} className="flex items-center gap-3 group">
+                      <label className="flex items-center gap-3 cursor-pointer flex-1 min-w-0">
+                        <input
+                          type="checkbox"
+                          checked={task.isCompleted ?? false}
+                          onChange={async () => {
+                            if (colId) {
+                              await editKanbanTask(colId, task.id, { isCompleted: !task.isCompleted });
+                              if (!task.isCompleted) toast(`"${task.title}" 완료!`, 'delight');
+                            }
+                          }}
+                          className="w-4 h-4 rounded border-white/20 bg-transparent text-primary focus:ring-primary cursor-pointer shrink-0"
+                        />
+                        <div className="min-w-0">
+                          <p className={cn('text-sm truncate transition-colors', task.isCompleted ? 'line-through text-on-surface-variant/50' : 'text-on-surface-variant group-hover:text-on-surface')}>
+                            {task.title}
+                          </p>
+                          <span className="text-[10px] text-on-surface-variant/40 font-medium">{colTitle}</span>
+                        </div>
+                      </label>
+                      {task.tag && (
+                        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-primary/10 text-primary shrink-0">{task.tag}</span>
+                      )}
+                    </div>
+                  );
+                })
+              )}
               {addingTask && (
                 <div className="flex items-center gap-2">
                   <input
                     ref={newTaskRef}
                     value={newTaskLabel}
                     onChange={(e) => setNewTaskLabel(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') handleAddSprintTask(); if (e.key === 'Escape') { setAddingTask(false); setNewTaskLabel(''); } }}
-                    placeholder="태스크 이름 입력..."
+                    onKeyDown={(e) => { if (e.key === 'Enter') handleAddTodayTask(); if (e.key === 'Escape') { setAddingTask(false); setNewTaskLabel(''); } }}
+                    placeholder="업무 이름 입력..."
                     className="flex-1 bg-surface-container-highest rounded-lg px-3 py-1.5 text-sm border-none focus:outline-none focus:ring-1 focus:ring-primary/30 placeholder:text-on-surface-variant/40"
                   />
-                  <button onClick={handleAddSprintTask} className="text-primary hover:text-secondary transition-colors">
+                  <button onClick={handleAddTodayTask} className="text-primary hover:text-secondary transition-colors">
                     <Plus className="w-4 h-4" />
                   </button>
                   <button onClick={() => { setAddingTask(false); setNewTaskLabel(''); }} className="text-on-surface-variant hover:text-on-surface transition-colors">
@@ -540,11 +639,12 @@ export function Dashboard() {
 
           {/* Team Completion Rate */}
           {(() => {
-            // 팀이 없으면 내 개인 완료율만 표시
-            const myDone  = sprintTasks.filter(t => t.checked).length;
-            const myTotal = sprintTasks.length || 1;
-            const mySprintRate = Math.round((myDone / myTotal) * 100);
-            const myRate = teamStats.length === 0 ? mySprintRate : myTeamRate;
+            // 개인 칸반 완료율 (팀이 없으면 이걸 표시)
+            const allKanbanTasks = kanban.flatMap(c => c.tasks);
+            const myDone  = allKanbanTasks.filter(t => t.isCompleted).length;
+            const myTotal = allKanbanTasks.length || 1;
+            const myKanbanRate = Math.round((myDone / myTotal) * 100);
+            const myRate = teamStats.length === 0 ? myKanbanRate : myTeamRate;
 
             const colorGrad: Record<string, string> = {
               primary: 'from-primary to-secondary',
@@ -560,12 +660,12 @@ export function Dashboard() {
                   <div className="flex justify-between items-center mb-5">
                     <div>
                       <h2 className="font-headline font-bold text-lg">팀 완료율</h2>
-                      <p className="text-[11px] text-on-surface-variant mt-0.5">소속 팀이 없습니다</p>
+                      <p className="text-[11px] text-on-surface-variant mt-0.5">개인 업무 달성 현황</p>
                     </div>
                     <div className="text-right">
                       <span className="text-3xl font-black font-headline">{myRate}%</span>
                       <div className="flex items-center justify-end text-xs text-primary font-bold mt-0.5">
-                        <TrendingUp className="w-3 h-3 mr-1" />개인 달성률
+                        <TrendingUp className="w-3 h-3 mr-1" />칸반 완료 기준
                       </div>
                     </div>
                   </div>
@@ -592,7 +692,7 @@ export function Dashboard() {
                       <div className="flex justify-between items-center mb-5">
                         <div>
                           <h2 className="font-headline font-bold text-lg">{team.name}</h2>
-                          <p className="text-[11px] text-on-surface-variant mt-0.5">팀 태스크 달성 현황</p>
+                          <p className="text-[11px] text-on-surface-variant mt-0.5">팀 평균 달성 현황</p>
                         </div>
                         <div className="text-right">
                           <span className="text-3xl font-black font-headline">{avg}%</span>
@@ -663,7 +763,7 @@ export function Dashboard() {
 
       {/* ── Metric Modals ────────────────────────────────────── */}
       <MetricModal open={metricModal === 'tasks'}     onClose={() => setMetricModal(null)} type="tasks"     sprintTasks={sprintTasks} kanban={kanban} />
-      <MetricModal open={metricModal === 'time'}      onClose={() => setMetricModal(null)} type="time"      sprintTasks={sprintTasks} kanban={kanban} />
+      <MetricModal open={metricModal === 'time'}      onClose={() => setMetricModal(null)} type="time"      sprintTasks={sprintTasks} kanban={kanban} projects={projects} getProjectProgress={getProjectProgress} avgProjectProgress={avgProjectProgress} />
       <MetricModal open={metricModal === 'deadlines'} onClose={() => setMetricModal(null)} type="deadlines" sprintTasks={sprintTasks} kanban={kanban} calEvents={calEvents} onOpenCalendar={() => { setMetricModal(null); setCalOpen(true); }} />
 
       {/* ── Activity Detail Modal ──────────────────────────────── */}
@@ -677,6 +777,7 @@ export function Dashboard() {
         onClose={() => setCalOpen(false)}
         events={calEvents}
         onAddEvent={addCalEvent}
+        onEditEvent={editCalEvent}
         onDeleteEvent={deleteCalEvent}
       />
 
@@ -774,7 +875,7 @@ const TICKET_DATA = [
   { label: '브랜딩',     closed: 18, open: 2,  color: 'tertiary' },
 ];
 
-function MetricModal({ open, onClose, type, sprintTasks, kanban, calEvents, onOpenCalendar }: {
+function MetricModal({ open, onClose, type, sprintTasks, kanban, calEvents, onOpenCalendar, projects, getProjectProgress, avgProjectProgress }: {
   open: boolean;
   onClose: () => void;
   type: 'tasks' | 'time' | 'deadlines';
@@ -782,10 +883,13 @@ function MetricModal({ open, onClose, type, sprintTasks, kanban, calEvents, onOp
   kanban: any[];
   calEvents?: CalEvent[];
   onOpenCalendar?: () => void;
+  projects?: any[];
+  getProjectProgress?: (id: string) => number;
+  avgProjectProgress?: number;
 }) {
   if (!open) return null;
 
-  const titles = { tasks: '미완료 태스크', time: '추적 시간', deadlines: '다가오는 마감' };
+  const titles = { tasks: '미완료 태스크', time: '프로젝트 달성률', deadlines: '다가오는 마감' };
 
   // Computed values
   const allKanbanTasks = kanban.flatMap((c: any) => c.tasks);
@@ -875,37 +979,54 @@ function MetricModal({ open, onClose, type, sprintTasks, kanban, calEvents, onOp
 
           {type === 'time' && (
             <div className="space-y-5">
+              {/* 전체 평균 달성률 */}
               <div className="flex items-end justify-between">
                 <div>
-                  <p className="text-4xl font-black font-headline">34.2h</p>
-                  <p className="text-xs text-on-surface-variant mt-1">지난 24시간 추적 시간</p>
+                  <p className="text-4xl font-black font-headline">{avgProjectProgress ?? 0}<span className="text-lg font-normal text-on-surface-variant ml-1">%</span></p>
+                  <p className="text-xs text-on-surface-variant mt-1">전체 프로젝트 평균 달성률</p>
                 </div>
                 <div className="text-xs text-on-surface-variant bg-white/5 px-3 py-1.5 rounded-lg">
-                  목표: <span className="text-secondary font-bold">40h / 주</span>
+                  총 <span className="text-secondary font-bold">{projects?.length ?? 0}개</span> 프로젝트
                 </div>
               </div>
+
+              {/* 평균 달성률 바 */}
               <div className="bg-white/5 rounded-xl p-4">
                 <div className="flex justify-between text-[11px] text-on-surface-variant mb-3">
-                  <span className="font-bold uppercase tracking-widest">주간 목표 달성률</span>
-                  <span className="font-bold text-secondary">85.5%</span>
+                  <span className="font-bold uppercase tracking-widest">평균 달성률</span>
+                  <span className="font-bold text-secondary">{avgProjectProgress ?? 0}%</span>
                 </div>
                 <div className="h-2.5 w-full bg-white/10 rounded-full overflow-hidden">
-                  <div className="h-full rounded-full bg-gradient-to-r from-secondary to-primary" style={{ width: '85.5%' }} />
+                  <div className="h-full rounded-full bg-gradient-to-r from-secondary to-primary" style={{ width: `${avgProjectProgress ?? 0}%` }} />
                 </div>
               </div>
+
+              {/* 프로젝트별 달성률 */}
               <div className="space-y-3">
-                <p className="text-[11px] font-bold text-on-surface-variant uppercase tracking-widest">프로젝트별 시간 배분</p>
-                {TIME_DATA.map(t => (
-                  <div key={t.project} className="flex items-center gap-3">
-                    <div className={cn('w-2.5 h-2.5 rounded-full bg-gradient-to-br shrink-0', t.color)} />
-                    <span className="text-sm flex-1 truncate">{t.project}</span>
-                    <span className="text-xs text-on-surface-variant w-12 text-right">{t.hours}h</span>
-                    <div className="w-24 h-1.5 bg-white/10 rounded-full overflow-hidden">
-                      <div className={cn('h-full rounded-full bg-gradient-to-r', t.color)} style={{ width: `${t.pct}%` }} />
+                <p className="text-[11px] font-bold text-on-surface-variant uppercase tracking-widest">프로젝트별 달성률</p>
+                {(projects ?? []).length === 0 ? (
+                  <p className="text-sm text-on-surface-variant/50 py-2">진행 중인 프로젝트가 없습니다.</p>
+                ) : (projects ?? []).map((p, i) => {
+                  const pct = getProjectProgress ? getProjectProgress(p.id) : 0;
+                  const colors = [
+                    { dot: 'from-primary to-primary-dim', bar: 'from-primary to-primary-dim' },
+                    { dot: 'from-secondary to-secondary-dim', bar: 'from-secondary to-secondary-dim' },
+                    { dot: 'from-tertiary to-tertiary-dim', bar: 'from-tertiary to-tertiary-dim' },
+                  ];
+                  const c = colors[i % colors.length];
+                  return (
+                    <div key={p.id} className="space-y-1.5">
+                      <div className="flex items-center gap-3">
+                        <div className={cn('w-2.5 h-2.5 rounded-full bg-gradient-to-br shrink-0', c.dot)} />
+                        <span className="text-sm flex-1 truncate">{p.name}</span>
+                        <span className="text-xs font-bold text-on-surface-variant">{pct}%</span>
+                      </div>
+                      <div className="ml-5 h-1.5 w-full bg-white/10 rounded-full overflow-hidden">
+                        <div className={cn('h-full rounded-full bg-gradient-to-r', c.bar)} style={{ width: `${pct}%` }} />
+                      </div>
                     </div>
-                    <span className="text-xs font-bold text-on-surface-variant w-8 text-right">{t.pct}%</span>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
@@ -985,12 +1106,13 @@ const DOT_COLOR: Record<CalEvent['color'], string> = {
 };
 
 function CalendarModal({
-  open, onClose, events, onAddEvent, onDeleteEvent
+  open, onClose, events, onAddEvent, onEditEvent, onDeleteEvent
 }: {
   open: boolean;
   onClose: () => void;
   events: CalEvent[];
   onAddEvent: (ev: Omit<CalEvent,'id'>) => void;
+  onEditEvent: (id: string, updates: Partial<Omit<CalEvent,'id'>>) => void;
   onDeleteEvent: (id: string) => void;
 }) {
   const { toast } = useToast();
@@ -1005,11 +1127,31 @@ function CalendarModal({
   const [evTime,   setEvTime]     = useState('');
   const [evTag,    setEvTag]      = useState('');
   const [evColor,  setEvColor]    = useState<CalEvent['color']>('primary');
+  const [evSharing, setEvSharing] = useState<'personal' | 'all'>('personal');
+
+  // Edit event state
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   // Reset add form when modal closes
   useEffect(() => {
-    if (!open) { setAddingEvent(false); setSelDay(null); }
+    if (!open) { setAddingEvent(false); setSelDay(null); setEditingId(null); }
   }, [open]);
+
+  function startEdit(ev: CalEvent) {
+    setEditingId(ev.id);
+    setEvTitle(ev.title);
+    setEvTime(ev.time ?? '');
+    setEvTag(ev.tag ?? '');
+    setEvColor(ev.color);
+    setEvSharing(ev.sharing ?? 'personal');
+    setAddingEvent(false);
+  }
+
+  function cancelForm() {
+    setAddingEvent(false);
+    setEditingId(null);
+    setEvTitle(''); setEvTime(''); setEvTag(''); setEvColor('primary'); setEvSharing('personal');
+  }
 
   function prevMonth() {
     if (viewMonth === 0) { setViewYear(y => y-1); setViewMonth(11); }
@@ -1051,10 +1193,16 @@ function CalendarModal({
 
   function handleAddEvent() {
     if (!evTitle.trim() || !selDay) return;
-    onAddEvent({ title: evTitle.trim(), date: selDay, time: evTime, color: evColor, tag: evTag.trim() || undefined });
+    onAddEvent({ title: evTitle.trim(), date: selDay, time: evTime, color: evColor, tag: evTag.trim() || undefined, sharing: evSharing });
     toast(`"${evTitle.trim()}" 이벤트가 추가되었습니다.`, 'success');
-    setEvTitle(''); setEvTime(''); setEvTag(''); setEvColor('primary');
-    setAddingEvent(false);
+    cancelForm();
+  }
+
+  function handleEditEvent() {
+    if (!editingId || !evTitle.trim()) return;
+    onEditEvent(editingId, { title: evTitle.trim(), time: evTime, color: evColor, tag: evTag.trim() || undefined, sharing: evSharing });
+    toast(`이벤트가 수정되었습니다.`, 'success');
+    cancelForm();
   }
 
   if (!open) return null;
@@ -1154,21 +1302,24 @@ function CalendarModal({
                     <p className="font-headline font-bold text-sm mt-0.5">{selEvents.length}개의 이벤트</p>
                   </div>
                   <button
-                    onClick={() => setAddingEvent(v => !v)}
+                    onClick={() => { cancelForm(); if (!addingEvent && !editingId) setAddingEvent(true); }}
                     className="w-7 h-7 rounded-lg bg-primary/10 text-primary flex items-center justify-center hover:bg-primary/20 transition-colors"
                   >
-                    {addingEvent ? <X className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />}
+                    {(addingEvent || editingId) ? <X className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />}
                   </button>
                 </div>
 
-                {/* Add event form */}
-                {addingEvent && (
+                {/* Add / Edit event form */}
+                {(addingEvent || editingId) && (
                   <div className="px-4 py-3 border-b border-white/5 space-y-2.5 bg-white/[0.03]">
+                    <p className="text-[10px] font-bold text-on-surface-variant uppercase tracking-widest">
+                      {editingId ? '이벤트 수정' : '새 이벤트'}
+                    </p>
                     <input
                       autoFocus
                       value={evTitle}
                       onChange={e => setEvTitle(e.target.value)}
-                      onKeyDown={e => { if (e.key === 'Enter') handleAddEvent(); if (e.key === 'Escape') setAddingEvent(false); }}
+                      onKeyDown={e => { if (e.key === 'Enter') editingId ? handleEditEvent() : handleAddEvent(); if (e.key === 'Escape') cancelForm(); }}
                       placeholder="이벤트 제목"
                       className="w-full bg-surface-container rounded-lg px-3 py-2 text-xs border-none focus:outline-none focus:ring-1 focus:ring-primary/30 placeholder:text-on-surface-variant/40"
                     />
@@ -1205,13 +1356,40 @@ function CalendarModal({
                         </button>
                       ))}
                     </div>
-                    <button
-                      onClick={handleAddEvent}
-                      disabled={!evTitle.trim()}
-                      className="w-full py-2 rounded-lg bg-gradient-to-r from-primary to-secondary text-surface text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition-all flex items-center justify-center gap-1.5"
-                    >
-                      <Check className="w-3 h-3" />이벤트 추가
-                    </button>
+                    {/* 공유 설정 */}
+                    <div className="flex gap-1.5">
+                      <button
+                        onClick={() => setEvSharing('personal')}
+                        className={cn('flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg text-[10px] font-bold transition-all border',
+                          evSharing === 'personal' ? 'bg-primary/20 border-primary/40 text-primary' : 'bg-white/5 border-white/10 text-on-surface-variant hover:bg-white/10'
+                        )}
+                      >
+                        <Lock className="w-2.5 h-2.5" />개인
+                      </button>
+                      <button
+                        onClick={() => setEvSharing('all')}
+                        className={cn('flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg text-[10px] font-bold transition-all border',
+                          evSharing === 'all' ? 'bg-secondary/20 border-secondary/40 text-secondary' : 'bg-white/5 border-white/10 text-on-surface-variant hover:bg-white/10'
+                        )}
+                      >
+                        <Globe className="w-2.5 h-2.5" />전체 공유
+                      </button>
+                    </div>
+                    <div className="flex gap-1.5">
+                      <button
+                        onClick={cancelForm}
+                        className="flex-1 py-2 rounded-lg bg-white/5 text-on-surface-variant text-xs font-bold hover:bg-white/10 transition-all"
+                      >
+                        취소
+                      </button>
+                      <button
+                        onClick={editingId ? handleEditEvent : handleAddEvent}
+                        disabled={!evTitle.trim()}
+                        className="flex-1 py-2 rounded-lg bg-gradient-to-r from-primary to-secondary text-surface text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition-all flex items-center justify-center gap-1.5"
+                      >
+                        <Check className="w-3 h-3" />{editingId ? '저장' : '추가'}
+                      </button>
+                    </div>
                   </div>
                 )}
 
@@ -1225,20 +1403,38 @@ function CalendarModal({
                     </div>
                   ) : selEvents.map(ev => (
                     <div key={ev.id} className={cn('p-3 rounded-xl border group relative transition-all hover:brightness-110', EVENT_COLOR[ev.color])}>
-                      {ev.tag && <span className="text-[10px] font-bold uppercase tracking-wider opacity-70">{ev.tag}</span>}
-                      <p className="text-xs font-semibold mt-0.5">{ev.title}</p>
-                      {ev.time && (
-                        <div className="flex items-center gap-1 mt-1 opacity-70">
-                          <Clock3 className="w-2.5 h-2.5" />
-                          <span className="text-[10px]">{ev.time}</span>
+                      <div className="flex items-start justify-between gap-1">
+                        <div className="flex-1 min-w-0">
+                          {ev.tag && <span className="text-[10px] font-bold uppercase tracking-wider opacity-70">{ev.tag}</span>}
+                          <p className="text-xs font-semibold mt-0.5">{ev.title}</p>
+                          {ev.time && (
+                            <div className="flex items-center gap-1 mt-1 opacity-70">
+                              <Clock3 className="w-2.5 h-2.5" />
+                              <span className="text-[10px]">{ev.time}</span>
+                            </div>
+                          )}
                         </div>
-                      )}
-                      <button
-                        onClick={() => { onDeleteEvent(ev.id); toast('이벤트가 삭제되었습니다.', 'info'); }}
-                        className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 hover:scale-110 transition-all"
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
+                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-all shrink-0">
+                          {ev.sharing === 'all'
+                            ? <Globe className="w-2.5 h-2.5 text-secondary" title="전체 공유" />
+                            : <Lock className="w-2.5 h-2.5 opacity-40" title="개인" />
+                          }
+                          <button
+                            onClick={() => startEdit(ev)}
+                            className="hover:scale-110 transition-all"
+                            title="수정"
+                          >
+                            <Edit2 className="w-3 h-3" />
+                          </button>
+                          <button
+                            onClick={() => { onDeleteEvent(ev.id); toast('이벤트가 삭제되었습니다.', 'info'); }}
+                            className="hover:scale-110 transition-all"
+                            title="삭제"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      </div>
                     </div>
                   ))}
                 </div>

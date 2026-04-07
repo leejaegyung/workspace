@@ -126,6 +126,9 @@ export function ProjectDetail() {
   const inprogTasks = kanban.find((c) => c.title === '진행 중')?.tasks ?? [];
   const todoTasks = kanban.find((c) => c.title === '할 일')?.tasks ?? [];
 
+  // 칸반 완료 태스크 기준 진행률 (Projects 페이지와 동일 방식)
+  const kanbanProgress = allTasks.length === 0 ? 0 : Math.round((doneTasks.length / allTasks.length) * 100);
+
   function handleAddMember() {
     const nameToUse = selectedUser?.name ?? newName.trim();
     if (!nameToUse) return;
@@ -257,15 +260,18 @@ export function ProjectDetail() {
             </div>
             {/* Progress */}
             <div className="sm:text-right shrink-0">
-              <span className="text-5xl font-black font-headline">{project.progress}%</span>
+              <span className="text-5xl font-black font-headline">{kanbanProgress}%</span>
               <p className="text-xs text-on-surface-variant mt-1 font-bold uppercase tracking-widest">진행률</p>
+              {allTasks.length > 0 && (
+                <p className="text-[11px] text-on-surface-variant/60 mt-0.5">{doneTasks.length}/{allTasks.length} 완료</p>
+              )}
             </div>
           </div>
           {/* Progress bar */}
           <div className="mt-6 h-2 w-full bg-white/10 rounded-full overflow-hidden">
             <div
               className={cn('h-full rounded-full bg-gradient-to-r transition-all duration-700', project.color)}
-              style={{ width: `${project.progress}%` }}
+              style={{ width: `${kanbanProgress}%` }}
             />
           </div>
         </div>

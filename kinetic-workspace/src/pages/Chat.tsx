@@ -49,11 +49,51 @@ export function Chat() {
     }
   }, [channels, activeChannelId]);
 
-  // ── WS 폴백: 채널 목록 폴링 (30초) — WS 미연결 시 대비 ─────────────────────
+  // ── WS 폴백: 채널 목록 폴링 (30초) — 새 DM 채널 감지 ──────────────────────
   useEffect(() => {
     const listPoll = setInterval(() => pollChannels(), 30000);
     return () => clearInterval(listPoll);
   }, []); // eslint-disable-line
+
+  // ── 활성 채널 폴링 (3초) — WS 실패 시 실시간 대체 ──────────────────────────
+  useEffect(() => {
+    if (!activeChannelId) return;
+    const activePoll = setInterval(() => {
+      const after = lastPollTimeRef.current[activeChannelId];
+      if (!after) return;
+      apiFetch(`/api/chat/channels/${activeChannelId}/messages?after=${encodeURIComponent(after)}`)
+        .then((r) => r.ok ? r.json() : { messages: [] })
+        .then(({ messages: serverMsgs = [] }) => {
+          if (!serverMsgs.length) return;
+          const mapped = serverMsgs.map((m: any) => mapServerMsg(m, user?.id));
+          receiveMessages(activeChannelId, mapped, true);
+          lastPollTimeRef.current[activeChannelId] = serverMsgs[serverMsgs.length - 1].created_at;
+        })
+        .catch(() => {});
+    }, 3000);
+    return () => clearInterval(activePoll);
+  }, [activeChannelId]); // eslint-disable-line
+
+  // ── 비활성 채널 폴링 (10초) — 읽지 않은 메시지 카운트 ──────────────────────
+  useEffect(() => {
+    const inactivePoll = setInterval(() => {
+      channels.forEach((ch) => {
+        if (ch.id === activeChannelId) return;
+        const after = lastPollTimeRef.current[ch.id];
+        if (!after) return;
+        apiFetch(`/api/chat/channels/${ch.id}/messages?after=${encodeURIComponent(after)}`)
+          .then((r) => r.ok ? r.json() : { messages: [] })
+          .then(({ messages: serverMsgs = [] }) => {
+            if (!serverMsgs.length) return;
+            const mapped = serverMsgs.map((m: any) => mapServerMsg(m, user?.id));
+            receiveMessages(ch.id, mapped, false);
+            lastPollTimeRef.current[ch.id] = serverMsgs[serverMsgs.length - 1].created_at;
+          })
+          .catch(() => {});
+      });
+    }, 10000);
+    return () => clearInterval(inactivePoll);
+  }, [channels, activeChannelId]); // eslint-disable-line
 
   const activeChannel = channels.find((c) => c.id === activeChannelId) ?? channels[0];
   const channelList   = channels.filter((c) => c.type === 'channel');
