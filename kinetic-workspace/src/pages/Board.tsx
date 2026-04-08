@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Plus, MoreHorizontal, Edit2, CheckCircle2, Calendar, Paperclip, MessageCircle, Trash2, X, Tag, BarChart2, UserPlus, Users } from 'lucide-react';
+import { Plus, MoreHorizontal, Edit2, CheckCircle2, Calendar, Paperclip, MessageCircle, Trash2, X, Tag, BarChart2, UserPlus, Users, ArrowRightLeft } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useApp, KanbanTask, KanbanColumn } from '../contexts/AppContext';
 import { useToast } from '../contexts/ToastContext';
@@ -17,9 +17,12 @@ const COLOR_OPTIONS: { label: string; value: ColorType }[] = [
 ];
 
 export function Board() {
-  const { kanban, addKanbanTask, editKanbanTask, deleteKanbanTask, addKanbanColumn, deleteKanbanColumn } = useApp();
+  const { kanban, addKanbanTask, editKanbanTask, deleteKanbanTask, moveKanbanTask, addKanbanColumn, deleteKanbanColumn } = useApp();
   const { toast } = useToast();
   const { user } = useAuth();
+
+  // 드래그 중인 태스크 참조 (컬럼 간 이동용)
+  const dragRef = useRef<{ colId: string; task: KanbanTask } | null>(null);
 
   // 개인 업무 보드 — 담당자는 본인만
   const allMembers = user ? [{ name: user.name, initial: user.name.charAt(0), color: 'from-primary to-secondary' }] : [];
@@ -118,6 +121,23 @@ export function Board() {
     toast(`"${title}" 태스크가 삭제되었습니다.`, 'info');
   }
 
+  /** 태스크를 다른 컬럼으로 이동 (서버 move API — ID 유지, 복사 없음) */
+  async function handleMoveTask(fromColId: string, toColId: string, task: KanbanTask) {
+    if (fromColId === toColId) return;
+    await moveKanbanTask(fromColId, toColId, task.id);
+  }
+
+  function handleDragStart(colId: string, task: KanbanTask) {
+    dragRef.current = { colId, task };
+  }
+
+  async function handleDrop(toColId: string) {
+    const drag = dragRef.current;
+    dragRef.current = null;
+    if (!drag || drag.colId === toColId) return;
+    await handleMoveTask(drag.colId, toColId, drag.task);
+  }
+
   async function handleMarkDone(colId: string, task: KanbanTask) {
     const doneCol = kanban.find((c) => c.title === '완료');
     if (doneCol) {
@@ -174,6 +194,8 @@ export function Board() {
             onMarkDone={(task) => handleMarkDone(col.id, task)}
             onViewDetail={(task) => openDetail(col.id, task)}
             onDeleteColumn={() => { deleteKanbanColumn(col.id).then(() => toast(`"${col.title}" 컬럼이 삭제되었습니다.`, 'info')).catch(() => toast('삭제 실패', 'error')); setColMenu(null); }}
+            onDragTaskStart={(task) => handleDragStart(col.id, task)}
+            onDropTask={() => handleDrop(col.id)}
           />
         ))}
 
@@ -385,7 +407,7 @@ export function Board() {
                 )}
 
                 {/* Meta row */}
-                <div className="grid grid-cols-2 gap-3 mb-5">
+                <div className="grid grid-cols-2 gap-3 mb-3">
                   {/* Date */}
                   <div className="flex items-center gap-2 bg-white/[0.03] rounded-xl px-3 py-2.5">
                     <Calendar className="w-3.5 h-3.5 text-on-surface-variant shrink-0" />
@@ -412,6 +434,32 @@ export function Board() {
                         />
                       ))}
                     </div>
+                  </div>
+                </div>
+
+                {/* Status (column) change */}
+                <div className="flex items-center gap-2 bg-white/[0.03] rounded-xl px-3 py-2.5 mb-5">
+                  <ArrowRightLeft className="w-3.5 h-3.5 text-on-surface-variant shrink-0" />
+                  <span className="text-xs text-on-surface-variant shrink-0">상태</span>
+                  <div className="flex gap-1.5 flex-wrap ml-1">
+                    {kanban.map((col) => (
+                      <button
+                        key={col.id}
+                        onClick={() => {
+                          if (col.id === detailModal.colId) return;
+                          handleMoveTask(detailModal.colId, col.id, task);
+                          setDetailModal((prev) => ({ ...prev, colId: col.id }));
+                        }}
+                        className={cn(
+                          'text-[0.65rem] font-bold px-2 py-0.5 rounded-full transition-all',
+                          col.id === detailModal.colId
+                            ? 'bg-primary/20 text-primary ring-1 ring-primary/40'
+                            : 'bg-white/5 text-on-surface-variant hover:bg-white/10'
+                        )}
+                      >
+                        {col.title}
+                      </button>
+                    ))}
                   </div>
                 </div>
 
@@ -581,7 +629,7 @@ function AssigneePicker({ assignees, allMembers, onToggle }: {
 
 // ─── KanbanColView ────────────────────────────────────────────────────────────
 
-function KanbanColView({ col, colMenu, colMenuRef, setColMenu, onAddTask, onEditTask, onDeleteTask, onMarkDone, onViewDetail, onDeleteColumn }: {
+function KanbanColView({ col, colMenu, colMenuRef, setColMenu, onAddTask, onEditTask, onDeleteTask, onMarkDone, onViewDetail, onDeleteColumn, onDragTaskStart, onDropTask }: {
   col: KanbanColumn;
   colMenu: string | null;
   colMenuRef: React.RefObject<HTMLDivElement>;
@@ -593,7 +641,11 @@ function KanbanColView({ col, colMenu, colMenuRef, setColMenu, onAddTask, onEdit
   onMarkDone: (task: KanbanTask) => void;
   onViewDetail: (task: KanbanTask) => void;
   onDeleteColumn: () => void;
+  onDragTaskStart: (task: KanbanTask) => void;
+  onDropTask: () => void;
 }) {
+  const [isDragOver, setIsDragOver] = useState(false);
+
   const colorDot: Record<string, string> = {
     primary:   'bg-primary shadow-[0_0_10px_rgba(151,169,255,0.6)]',
     secondary: 'bg-secondary shadow-[0_0_10px_rgba(172,138,255,0.6)]',
@@ -602,7 +654,12 @@ function KanbanColView({ col, colMenu, colMenuRef, setColMenu, onAddTask, onEdit
   const isDone = col.id === 'done';
 
   return (
-    <section className={cn('min-w-[320px] max-w-[320px] flex flex-col gap-4 transition-opacity', isDone && 'opacity-70')}>
+    <section
+      className={cn('min-w-[320px] max-w-[320px] flex flex-col gap-4 transition-all', isDone && 'opacity-70', isDragOver && 'ring-2 ring-primary/40 rounded-2xl')}
+      onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
+      onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setIsDragOver(false); }}
+      onDrop={(e) => { e.preventDefault(); setIsDragOver(false); onDropTask(); }}
+    >
       <div className="flex items-center justify-between px-2 mb-2">
         <div className="flex items-center gap-3">
           <div className={cn('w-2 h-2 rounded-full', colorDot[col.color] ?? colorDot.primary)} />
@@ -636,6 +693,7 @@ function KanbanColView({ col, colMenu, colMenuRef, setColMenu, onAddTask, onEdit
           onMarkDone={() => onMarkDone(task)}
           onViewDetail={() => onViewDetail(task)}
           isDoneCol={isDone}
+          onDragStart={() => onDragTaskStart(task)}
         />
       ))}
 
@@ -651,13 +709,14 @@ function KanbanColView({ col, colMenu, colMenuRef, setColMenu, onAddTask, onEdit
 
 // ─── TaskCard ─────────────────────────────────────────────────────────────────
 
-function TaskCard({ task, onEdit, onDelete, onMarkDone, onViewDetail, isDoneCol }: {
+function TaskCard({ task, onEdit, onDelete, onMarkDone, onViewDetail, isDoneCol, onDragStart }: {
   task: KanbanTask;
   onEdit: () => void;
   onDelete: () => void;
   onMarkDone: () => void;
   onViewDetail: () => void;
   isDoneCol: boolean;
+  onDragStart: () => void;
   key?: React.Key;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -679,9 +738,11 @@ function TaskCard({ task, onEdit, onDelete, onMarkDone, onViewDetail, isDoneCol 
 
   return (
     <article
+      draggable
+      onDragStart={(e) => { e.stopPropagation(); onDragStart(); }}
       onClick={onViewDetail}
       className={cn(
-        'bg-surface-container rounded-xl p-5 shadow-lg group hover:bg-surface-bright transition-all cursor-pointer',
+        'bg-surface-container rounded-xl p-5 shadow-lg group hover:bg-surface-bright transition-all cursor-grab active:cursor-grabbing',
         task.isUrgent ? 'border-l-2 border-error' : !task.isCompleted ? `border-l-2 border-${task.color}` : ''
       )}
     >

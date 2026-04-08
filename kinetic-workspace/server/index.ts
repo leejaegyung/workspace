@@ -43,6 +43,12 @@ app.get('*', (_, res) => {
   res.sendFile(path.join(DIST, 'index.html'));
 });
 
+// ── 전역 에러 핸들러 — 라우터에서 throw된 에러를 JSON으로 통일 반환 ──────────
+app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error('[Server] Unhandled error:', err?.message ?? err);
+  res.status(500).json({ error: 'Internal server error', detail: err?.message });
+});
+
 // ── HTTP 서버 + WebSocket 서버 ─────────────────────────────────────────────────
 const httpServer = createServer(app);
 const wss = new WebSocketServer({ server: httpServer, path: '/ws' });

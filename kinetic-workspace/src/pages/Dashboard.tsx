@@ -311,13 +311,18 @@ export function Dashboard() {
 
           {/* Metric cards */}
           {(() => {
-            const pendingTasks = kanban.flatMap(c => c.tasks).filter(t => !t.isCompleted).length;
+            const allKanbanTasks = kanban.flatMap(c => c.tasks);
+            const doneKanbanTasks = kanban.find(c => c.title === '완료')?.tasks.length ?? 0;
+            // 완료 기준 달성률: 완료 컬럼 태스크 / 전체 태스크
+            const kanbanProgress = allKanbanTasks.length
+              ? Math.round((doneKanbanTasks / allKanbanTasks.length) * 100)
+              : 0;
             const today2 = new Date(); today2.setHours(0,0,0,0);
             const in7days = new Date(today2); in7days.setDate(in7days.getDate() + 7);
             const upcomingCount = calEvents.filter(e => { const d = new Date(e.date + 'T00:00'); return d >= today2 && d <= in7days; }).length;
             return (
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
-                <MetricCard icon={CheckCircle2} label="미완료 태스크"    value={String(pendingTasks)}            trend="칸반 기준"         color="primary"   onClick={() => setMetricModal('tasks')} />
+                <MetricCard icon={CheckCircle2} label="개인 업무 현황"  value={`${kanbanProgress}%`}            trend={`${doneKanbanTasks}/${allKanbanTasks.length} 완료`} color="primary"   onClick={() => setMetricModal('tasks')} />
                 <MetricCard icon={BarChart2}    label="프로젝트 달성률" value={`${avgProjectProgress}%`}         trend={`${projects.length}개 프로젝트`} color="secondary" onClick={() => setMetricModal('time')} />
                 <MetricCard icon={Calendar}     label="다가오는 마감"    value={String(upcomingCount)}           trend="7일 이내"           color="tertiary"  onClick={() => setMetricModal('deadlines')} />
               </div>
@@ -692,7 +697,7 @@ export function Dashboard() {
                       <div className="flex justify-between items-center mb-5">
                         <div>
                           <h2 className="font-headline font-bold text-lg">{team.name}</h2>
-                          <p className="text-[11px] text-on-surface-variant mt-0.5">팀 평균 달성 현황</p>
+                          <p className="text-[11px] text-on-surface-variant mt-0.5">팀 스프린트 달성률</p>
                         </div>
                         <div className="text-right">
                           <span className="text-3xl font-black font-headline">{avg}%</span>
@@ -889,7 +894,7 @@ function MetricModal({ open, onClose, type, sprintTasks, kanban, calEvents, onOp
 }) {
   if (!open) return null;
 
-  const titles = { tasks: '미완료 태스크', time: '프로젝트 달성률', deadlines: '다가오는 마감' };
+  const titles = { tasks: '개인 업무 현황', time: '프로젝트 달성률', deadlines: '다가오는 마감' };
 
   // Computed values
   const allKanbanTasks = kanban.flatMap((c: any) => c.tasks);
@@ -918,64 +923,85 @@ function MetricModal({ open, onClose, type, sprintTasks, kanban, calEvents, onOp
         </div>
 
         <div className="p-6">
-          {type === 'tasks' && (
+          {type === 'tasks' && (() => {
+            const doneCol   = kanban.find((c: any) => c.title === '완료');
+            const doneCnt   = doneCol?.tasks.length ?? 0;
+            const totalCnt  = allKanbanTasks.length;
+            const progress  = totalCnt ? Math.round((doneCnt / totalCnt) * 100) : 0;
+            const todoCnt   = kanban.find((c: any) => c.title === '할 일')?.tasks.length ?? 0;
+            const inProgCnt = allKanbanTasks.length - todoCnt - doneCnt;
+            return (
             <div className="space-y-5">
-              {/* Summary */}
+              {/* 완료율 대형 표시 */}
+              <div className="flex items-end justify-between">
+                <div>
+                  <p className="text-5xl font-black font-headline text-primary">{progress}<span className="text-xl font-normal text-on-surface-variant ml-1">%</span></p>
+                  <p className="text-xs text-on-surface-variant mt-1">개인 업무 완료율 (칸반 기준)</p>
+                </div>
+                <div className="text-xs text-on-surface-variant bg-white/5 px-3 py-1.5 rounded-lg">
+                  총 <span className="text-primary font-bold">{totalCnt}개</span> 태스크
+                </div>
+              </div>
+
+              {/* 완료율 바 */}
+              <div className="bg-white/5 rounded-xl p-4">
+                <div className="flex justify-between text-[11px] text-on-surface-variant mb-3">
+                  <span className="font-bold uppercase tracking-widest">완료 진행률</span>
+                  <span className="font-bold text-primary">{doneCnt} / {totalCnt}</span>
+                </div>
+                <div className="h-3 w-full bg-white/10 rounded-full overflow-hidden">
+                  <div className="h-full rounded-full bg-gradient-to-r from-primary to-secondary transition-all duration-500" style={{ width: `${progress}%` }} />
+                </div>
+              </div>
+
+              {/* Summary 3칸 */}
               <div className="grid grid-cols-3 gap-3">
                 {[
-                  { label: '스프린트 미완료', value: pendingSprint.length, unit: '개', color: 'text-primary' },
-                  { label: '칸반 진행 중',    value: allKanbanTasks.filter((t:any)=>!t.isCompleted).length, unit: '개', color: 'text-secondary' },
-                  { label: '오늘 완료',       value: doneSprint.length, unit: '개', color: 'text-tertiary' },
+                  { label: '할 일',   value: todoCnt,   color: 'text-primary' },
+                  { label: '진행 중', value: inProgCnt, color: 'text-secondary' },
+                  { label: '완료',    value: doneCnt,   color: 'text-tertiary' },
                 ].map(s => (
                   <div key={s.label} className="bg-white/5 rounded-xl p-4 text-center">
-                    <p className={cn('text-3xl font-black font-headline', s.color)}>{s.value}<span className="text-xs font-normal text-on-surface-variant ml-1">{s.unit}</span></p>
+                    <p className={cn('text-3xl font-black font-headline', s.color)}>{s.value}<span className="text-xs font-normal text-on-surface-variant ml-1">개</span></p>
                     <p className="text-[11px] text-on-surface-variant mt-1">{s.label}</p>
                   </div>
                 ))}
               </div>
 
-              {/* Sprint progress */}
-              <div className="bg-white/5 rounded-xl p-4">
-                <div className="flex justify-between text-[11px] text-on-surface-variant mb-3">
-                  <span className="font-bold uppercase tracking-widest">오늘의 스프린트 달성률</span>
-                  <span className="font-bold text-primary">{sprintRate}%</span>
-                </div>
-                <div className="h-2.5 w-full bg-white/10 rounded-full overflow-hidden">
-                  <div className="h-full rounded-full bg-gradient-to-r from-primary to-secondary" style={{ width: `${sprintRate}%` }} />
-                </div>
+              {/* 칸반 열별 비율 바 */}
+              <div className="space-y-2">
+                <p className="text-[11px] font-bold text-on-surface-variant uppercase tracking-widest">컬럼별 현황</p>
+                {kanban.map((col: any) => {
+                  const pct = totalCnt ? Math.round((col.tasks.length / totalCnt) * 100) : 0;
+                  return (
+                    <div key={col.id} className="flex items-center gap-3">
+                      <span className="text-sm w-16 shrink-0">{col.title}</span>
+                      <div className="flex-1 h-2 bg-white/10 rounded-full overflow-hidden">
+                        <div className={cn('h-full rounded-full', col.color === 'primary' ? 'bg-primary' : col.color === 'secondary' ? 'bg-secondary' : 'bg-tertiary')}
+                          style={{ width: `${pct}%` }} />
+                      </div>
+                      <span className="text-xs font-bold text-on-surface-variant w-16 text-right">{col.tasks.length}개 ({pct}%)</span>
+                    </div>
+                  );
+                })}
               </div>
 
-              {/* Pending sprint tasks */}
-              <div className="space-y-2">
-                <p className="text-[11px] font-bold text-on-surface-variant uppercase tracking-widest">미완료 스프린트 태스크</p>
-                {pendingSprint.length === 0
-                  ? <p className="text-sm text-on-surface-variant/50 py-2">모든 스프린트 태스크를 완료했습니다! 🎉</p>
-                  : pendingSprint.map((t: any) => (
+              {/* 완료된 태스크 목록 */}
+              {doneCol && doneCol.tasks.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-[11px] font-bold text-on-surface-variant uppercase tracking-widest">완료된 태스크</p>
+                  {doneCol.tasks.map((t: any) => (
                     <div key={t.id} className="flex items-center gap-3 bg-white/5 rounded-xl px-4 py-3">
-                      <div className="w-2 h-2 rounded-full bg-primary shrink-0" />
-                      <span className="text-sm flex-1">{t.label}</span>
-                      <span className="text-[10px] text-on-surface-variant/50">미완료</span>
+                      <div className="w-2 h-2 rounded-full bg-tertiary shrink-0" />
+                      <span className="text-sm flex-1 line-through text-on-surface-variant">{t.title}</span>
+                      <span className="text-[10px] text-tertiary font-bold">완료</span>
                     </div>
-                  ))
-                }
-              </div>
-
-              {/* Kanban by column */}
-              <div className="space-y-2">
-                <p className="text-[11px] font-bold text-on-surface-variant uppercase tracking-widest">칸반 열별 현황</p>
-                {kanban.map((col: any) => (
-                  <div key={col.id} className="flex items-center gap-3">
-                    <span className="text-sm flex-1">{col.title}</span>
-                    <div className="w-32 h-1.5 bg-white/10 rounded-full overflow-hidden">
-                      <div className={cn('h-full rounded-full', col.color === 'primary' ? 'bg-primary' : col.color === 'secondary' ? 'bg-secondary' : 'bg-tertiary')}
-                        style={{ width: `${Math.min((col.tasks.length / Math.max(allKanbanTasks.length, 1)) * 100, 100)}%` }} />
-                    </div>
-                    <span className="text-xs font-bold text-on-surface-variant w-8 text-right">{col.tasks.length}개</span>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
-          )}
+            );
+          })()}
 
           {type === 'time' && (
             <div className="space-y-5">

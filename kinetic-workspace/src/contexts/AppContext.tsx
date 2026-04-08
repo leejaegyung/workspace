@@ -70,6 +70,8 @@ export interface ChatMessage {
   reactions?: { emoji: string; count: number; active: boolean }[];
   attachment?: { name: string; size: string; image: string };
   serverTime?: string;
+  /** 낙관적 전송 실패 시 true — 재시도 전까지 UI에 표시 */
+  failed?: boolean;
 }
 
 export interface Channel {
@@ -128,6 +130,7 @@ interface AppContextType {
   addKanbanTask: (colId: string, task: Omit<KanbanTask, 'id'>) => Promise<void>;
   editKanbanTask: (colId: string, taskId: string, updates: Partial<KanbanTask>) => Promise<void>;
   deleteKanbanTask: (colId: string, taskId: string) => Promise<void>;
+  moveKanbanTask: (fromColId: string, toColId: string, taskId: string) => Promise<void>;
   addKanbanColumn: (title: string) => Promise<void>;
   deleteKanbanColumn: (colId: string) => Promise<void>;
   // Project Kanban
@@ -135,13 +138,14 @@ interface AppContextType {
   addProjectKanbanTask: (projectId: string, colId: string, task: Omit<KanbanTask, 'id'>) => Promise<void>;
   editProjectKanbanTask: (projectId: string, colId: string, taskId: string, updates: Partial<KanbanTask>) => Promise<void>;
   deleteProjectKanbanTask: (projectId: string, colId: string, taskId: string) => Promise<void>;
+  moveProjectKanbanTask: (projectId: string, fromColId: string, toColId: string, taskId: string) => Promise<void>;
   addProjectKanbanColumn: (projectId: string, title: string) => Promise<void>;
   deleteProjectKanbanColumn: (projectId: string, colId: string) => Promise<void>;
   initProjectKanban: (projectId: string) => Promise<void>;
   // Chat
   channels: Channel[];
   registeredUsers: { id: string; name: string; email: string }[];
-  sendMessage: (channelId: string, content: string, senderName?: string) => void;
+  sendMessage: (channelId: string, content: string, senderName?: string) => Promise<string | null>;
   receiveMessages: (channelId: string, newMsgs: ChatMessage[], isActive: boolean) => void;
   toggleReaction: (channelId: string, msgId: string, emoji: string) => void;
   markChannelRead: (channelId: string) => void;
@@ -301,6 +305,25 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     ));
   };
 
+  /** 태스크를 동일 ID 유지하며 다른 컬럼으로 이동 (서버 move API 사용) */
+  const moveKanbanTask = async (fromColId: string, toColId: string, taskId: string) => {
+    await api('PATCH', `/kanban/personal/tasks/${taskId}/move`, { colId: toColId });
+    setKanban((prev) => {
+      let movedTask: KanbanTask | undefined;
+      const removed = prev.map((col) => {
+        if (col.id === fromColId) {
+          movedTask = col.tasks.find((t) => t.id === taskId);
+          return { ...col, tasks: col.tasks.filter((t) => t.id !== taskId) };
+        }
+        return col;
+      });
+      if (!movedTask) return prev;
+      return removed.map((col) =>
+        col.id === toColId ? { ...col, tasks: [...col.tasks, movedTask!] } : col
+      );
+    });
+  };
+
   const addKanbanColumn = async (title: string) => {
     const { id } = await api('POST', '/kanban/personal/columns', { title });
     setKanban((prev) => [...prev, { id, title, color: 'primary', tasks: [] }]);
@@ -352,6 +375,28 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }));
   };
 
+  /** 프로젝트 태스크를 동일 ID 유지하며 다른 컬럼으로 이동 */
+  const moveProjectKanbanTask = async (projectId: string, fromColId: string, toColId: string, taskId: string) => {
+    await api('PATCH', `/kanban/${projectId}/tasks/${taskId}/move`, { colId: toColId });
+    setProjectKanban((prev) => {
+      let movedTask: KanbanTask | undefined;
+      const removed = (prev[projectId] ?? []).map((col) => {
+        if (col.id === fromColId) {
+          movedTask = col.tasks.find((t) => t.id === taskId);
+          return { ...col, tasks: col.tasks.filter((t) => t.id !== taskId) };
+        }
+        return col;
+      });
+      if (!movedTask) return prev;
+      return {
+        ...prev,
+        [projectId]: removed.map((col) =>
+          col.id === toColId ? { ...col, tasks: [...col.tasks, movedTask!] } : col
+        ),
+      };
+    });
+  };
+
   const addProjectKanbanColumn = async (projectId: string, title: string) => {
     const { id } = await api('POST', `/kanban/${projectId}/columns`, { title });
     setProjectKanban((prev) => ({
@@ -373,15 +418,21 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [registeredUsers, setRegisteredUsers] = useState<{ id: string; name: string; email: string }[]>([]);
   const activeChannelIdRef                    = useRef<string>('');
 
-  // 최초 로드: 전체 교체 (앱 시작 시 1회)
+  // 최초 로드: 기존 채널의 messages·unread는 보존 (낙관적 메시지 손실 방지)
   function loadChannels() {
     apiFetch('/api/chat/channels')
       .then((r) => r.ok ? r.json() : { channels: [] })
       .then(({ channels: apiChannels = [] }) => {
-        setChannels(apiChannels.map((ch: any) => ({
-          id: ch.id, name: ch.name, type: ch.type as 'channel' | 'dm',
-          status: 'online' as const, unread: 0, messages: [],
-        })));
+        setChannels((prev) => {
+          const prevMap = new Map(prev.map((ch) => [ch.id, ch]));
+          return (apiChannels as any[]).map((ch) => {
+            const existing = prevMap.get(ch.id);
+            // 기존 채널이면 messages·unread 보존, 새 채널이면 빈 상태로
+            return existing
+              ? { ...existing, name: ch.name, type: ch.type as 'channel' | 'dm' }
+              : { id: ch.id, name: ch.name, type: ch.type as 'channel' | 'dm', status: 'online' as const, unread: 0, messages: [] };
+          });
+        });
       })
       .catch(() => {});
   }
@@ -482,7 +533,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     };
   }, []); // eslint-disable-line
 
-  const sendMessage = (channelId: string, content: string, senderName?: string) => {
+  const sendMessage = (channelId: string, content: string, senderName?: string): Promise<string | null> => {
     const tempId = `temp-${crypto.randomUUID()}`;
     const msg: ChatMessage = {
       id: tempId, user: senderName ?? 'Me',
@@ -492,11 +543,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setChannels((prev) => prev.map((ch) =>
       ch.id === channelId ? { ...ch, messages: [...ch.messages, msg] } : ch
     ));
-    apiFetch(`/api/chat/channels/${channelId}/messages`, {
+    return apiFetch(`/api/chat/channels/${channelId}/messages`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content }),
     })
-      .then((r) => r.ok ? r.json() : null)
+      .then(async (r) => {
+        if (r.ok) return r.json();
+        // 실패 시 응답 본문도 로깅 — 401/404/500 원인 파악용
+        const body = await r.text().catch(() => '(응답 본문 읽기 실패)');
+        console.error(`[Chat] POST 실패 status=${r.status}:`, body);
+        return Promise.reject(r.status);
+      })
       .then((data) => {
         if (data?.message) {
           setChannels((prev) => prev.map((ch) => {
@@ -508,9 +565,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               ),
             };
           }));
+          return data.message.created_at as string;
         }
+        return null;
       })
-      .catch(() => {});
+      .catch((err) => {
+        // 전송 실패 시 메시지를 제거하지 않고 failed 상태로 마킹 — 사용자가 재시도할 수 있게 유지
+        console.error('[Chat] 메시지 전송 실패 (status/error):', err);
+        setChannels((prev) => prev.map((ch) =>
+          ch.id === channelId
+            ? { ...ch, messages: ch.messages.map((m) => m.id === tempId ? { ...m, failed: true } : m) }
+            : ch
+        ));
+        return Promise.reject(err);
+      });
   };
 
   const receiveMessages = (channelId: string, newMsgs: ChatMessage[], isActive: boolean) => {
@@ -635,8 +703,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       projects, projectsLoading, addProject, updateProject, deleteProject, addProjectMember, removeProjectMember,
       sprintTasks, toggleSprintTask, addSprintTask, deleteSprintTask,
       activities, addActivity, markAllRead,
-      kanban, kanbanLoading, addKanbanTask, editKanbanTask, deleteKanbanTask, addKanbanColumn, deleteKanbanColumn,
-      projectKanban, addProjectKanbanTask, editProjectKanbanTask, deleteProjectKanbanTask, addProjectKanbanColumn, deleteProjectKanbanColumn, initProjectKanban,
+      kanban, kanbanLoading, addKanbanTask, editKanbanTask, deleteKanbanTask, moveKanbanTask, addKanbanColumn, deleteKanbanColumn,
+      projectKanban, addProjectKanbanTask, editProjectKanbanTask, deleteProjectKanbanTask, moveProjectKanbanTask, addProjectKanbanColumn, deleteProjectKanbanColumn, initProjectKanban,
       channels, registeredUsers, sendMessage, receiveMessages, toggleReaction, markChannelRead, addChannel, openDM, leaveChannel, loadChannels, pollChannels, setActiveChannelId,
       files, filesLoading, addFolder, addFile, deleteFile, renameFile,
       notifications, addNotification, markNotificationRead, markAllNotificationsRead,

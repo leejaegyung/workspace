@@ -519,22 +519,18 @@ router.delete('/teams/:id/members/:userId', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-// GET /api/data/teams/my-stats  — 내가 속한 팀 + 팀원별 개인 칸반 완료율
+// GET /api/data/teams/my-stats  — 내가 속한 팀 + 팀원별 스프린트 달성률
 router.get('/teams/my-stats', requireAuth, (req, res) => {
   const me = (req as any).user;
 
-  function getUserKanbanRate(userId: string): number {
-    // 해당 유저의 personal 칸반 완료율 계산
-    const total = (db.prepare(`
-      SELECT COUNT(*) as c FROM kanban_tasks t
-      JOIN kanban_columns c ON t.column_id = c.id
-      WHERE c.project_id = 'personal'
-    `).get() as any)?.c ?? 0;
-    const done = (db.prepare(`
-      SELECT COUNT(*) as c FROM kanban_tasks t
-      JOIN kanban_columns c ON t.column_id = c.id
-      WHERE c.project_id = 'personal' AND c.title = '완료'
-    `).get() as any)?.c ?? 0;
+  function getUserSprintRate(userId: string): number {
+    // 해당 유저의 sprint_tasks 기준 달성률 — user_id로 개인별 구분 가능
+    const total = (db.prepare(
+      'SELECT COUNT(*) as c FROM sprint_tasks WHERE user_id = ?'
+    ).get(userId) as any)?.c ?? 0;
+    const done = (db.prepare(
+      'SELECT COUNT(*) as c FROM sprint_tasks WHERE user_id = ? AND checked = 1'
+    ).get(userId) as any)?.c ?? 0;
     return total === 0 ? 0 : Math.round((done / total) * 100);
   }
 
@@ -552,12 +548,12 @@ router.get('/teams/my-stats', requireAuth, (req, res) => {
     return {
       id: team.id, name: team.name, color: team.color,
       members: members.map((m: any) => ({
-        id: m.id, name: m.name, rate: getUserKanbanRate(m.id), isMe: m.id === me.id,
+        id: m.id, name: m.name, rate: getUserSprintRate(m.id), isMe: m.id === me.id,
       })),
     };
   });
 
-  const myRate = getUserKanbanRate(me.id);
+  const myRate = getUserSprintRate(me.id);
   res.json({ teams: result, myRate, myName: me.name });
 });
 

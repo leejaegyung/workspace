@@ -29,6 +29,14 @@ cd /d "%WORK_DIR%"
 echo  Working dir: %CD%
 echo.
 
+echo  [0/2] Stopping existing server on port 3001...
+for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":3001 " ^| findstr "LISTENING"') do (
+    echo  Killing PID %%a...
+    taskkill /PID %%a /F > nul 2>&1
+)
+timeout /t 1 > nul
+echo.
+
 echo  [1/2] Building frontend...
 call npm run build
 if not %errorlevel% == 0 (

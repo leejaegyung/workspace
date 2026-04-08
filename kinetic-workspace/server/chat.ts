@@ -206,9 +206,14 @@ router.post('/channels/:id/messages', (req: Request, res: Response) => {
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
 
-  db.prepare(
-    'INSERT INTO chat_messages (id, channel_id, user_id, user_name, content, created_at) VALUES (?, ?, ?, ?, ?, ?)'
-  ).run(id, req.params.id, me.id, me.name, content.trim(), now);
+  try {
+    db.prepare(
+      'INSERT INTO chat_messages (id, channel_id, user_id, user_name, content, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(id, req.params.id, me.id, me.name, content.trim(), now);
+  } catch (e: any) {
+    console.error('[chat] INSERT 실패:', e.message);
+    return res.status(500).json({ error: 'DB error', detail: e.message });
+  }
 
   const messageData = { id, channel_id: req.params.id, user_id: me.id, user_name: me.name, content: content.trim(), created_at: now };
 

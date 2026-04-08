@@ -127,18 +127,30 @@ export function Chat() {
       .then(({ messages: serverMsgs = [] }) => {
         const mapped = serverMsgs.map((m: any) => mapServerMsg(m, user?.id));
         receiveMessages(activeChannelId, mapped, true);
-        if (serverMsgs.length > 0) {
-          lastPollTimeRef.current[activeChannelId] = serverMsgs[serverMsgs.length - 1].created_at;
-        }
+        // 메시지가 없어도 폴링 기준 시간을 설정 — 빈 채널(새 DM 등)도 폴링이 동작하도록
+        lastPollTimeRef.current[activeChannelId] = serverMsgs.length > 0
+          ? serverMsgs[serverMsgs.length - 1].created_at
+          : new Date(Date.now() - 2000).toISOString();
       })
       .catch(() => {});
   }, [activeChannelId]);  // eslint-disable-line
 
   function handleSend() {
     if (!inputText.trim() || !activeChannel) return;
-    sendMessage(activeChannel.id, inputText.trim(), user?.name);
+    const chId = activeChannel.id;
     setInputText('');
     inputRef.current?.focus();
+    sendMessage(chId, inputText.trim(), user?.name)
+      .then((serverTime) => {
+        // 전송 성공 시 폴링 기준 시간을 서버 시간으로 업데이트
+        if (serverTime) lastPollTimeRef.current[chId] = serverTime;
+      })
+      .catch((err) => {
+        console.error('[Chat] handleSend 전송 실패:', err);
+        // err 가 HTTP 상태 코드(숫자)면 표시, 아니면 일반 메시지
+        const detail = typeof err === 'number' ? ` (${err})` : '';
+        toast(`메시지 전송에 실패했습니다${detail}. 브라우저 콘솔을 확인해 주세요.`, 'error');
+      });
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
@@ -166,7 +178,8 @@ export function Chat() {
   );
 
   return (
-    <div className="flex h-full bg-surface overflow-hidden -mx-6 lg:-mx-10 -mt-6">
+    <div className="flex bg-surface overflow-hidden -mx-6 lg:-mx-10 -mt-24 -mb-12" style={{ height: 'calc(100% + 9rem)' }}>
+      {/* -mt-24/-mb-12으로 main의 pt-24/pb-12 패딩을 상쇄, calc로 content area에 패딩만큼 높이를 추가 확보 */}
 
       {/* ── Sidebar ──────────────────────────────────────────── */}
       <section className="w-72 bg-surface-container-low flex flex-col shrink-0">
@@ -188,7 +201,7 @@ export function Chat() {
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-3 py-4 space-y-6 hide-scrollbar">
+        <div className="flex-1 min-h-0 overflow-y-auto px-3 py-4 space-y-6 hide-scrollbar">
           {/* Channels */}
           <div>
             <div className="flex items-center justify-between px-3 mb-2">
@@ -352,8 +365,8 @@ export function Chat() {
           </div>
         </header>
 
-        {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-8 space-y-6 hide-scrollbar">
+        {/* Messages — min-h-0 필수: 중첩 flex에서 flex-1만으론 부모 높이를 초과해 overflow가 안 잘림 */}
+        <div className="flex-1 min-h-0 overflow-y-auto p-8 space-y-6 hide-scrollbar">
           {searchQuery && filteredMessages.length === 0 && (
             <div className="flex flex-col items-center justify-center py-16 text-on-surface-variant/40">
               <Search className="w-8 h-8 mb-3" />
@@ -513,10 +526,18 @@ function MessageBubble({ msg, emojiPicker, emojiRef, onEmojiOpen, onReact, userN
         </div>
 
         {msg.content && (
-          <div className={cn('px-4 py-3 rounded-2xl text-sm leading-relaxed border border-outline-variant/5',
-            isMe ? 'bg-gradient-to-br from-primary to-secondary text-surface font-medium rounded-tr-none' : 'bg-surface-container-high text-on-surface rounded-tl-none'
+          <div className={cn('px-4 py-3 rounded-2xl text-sm leading-relaxed border',
+            isMe
+              ? msg.failed
+                ? 'bg-error/20 border-error/30 text-on-surface font-medium rounded-tr-none'
+                : 'bg-gradient-to-br from-primary to-secondary text-surface font-medium rounded-tr-none border-outline-variant/5'
+              : 'bg-surface-container-high text-on-surface rounded-tl-none border-outline-variant/5'
           )}>
             {msg.content}
+            {/* 전송 실패 표시 — 낙관적 업데이트가 실패한 경우 */}
+            {msg.failed && (
+              <div className="text-[10px] text-error mt-1">전송 실패 · 서버 콘솔을 확인해 주세요</div>
+            )}
           </div>
         )}
 
